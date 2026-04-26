@@ -1,93 +1,101 @@
 #!/bin/bash
+set -e
 
+echo "[1/12] Updating system..."
 apt update -y && apt upgrade -y
 
-apt install grub2 wimtools ntfs-3g -y
+echo "[2/12] Installing dependencies..."
+apt install -y grub-pc-bin grub2-common parted gdisk wimtools ntfs-3g rsync wget curl
 
-#Get the disk size in GB and convert to MB
-disk_size_gb=$(parted /dev/sda --script print | awk '/^Disk \/dev\/sda:/ {print int($3)}')
-disk_size_mb=$((disk_size_gb * 1024))
+echo "[3/12] Detecting main disk..."
+DISK=$(lsblk -dpno NAME | grep -E "/dev/sd|/dev/vd|/dev/nvme" | head -n1)
+echo "Detected disk: $DISK"
 
-#Calculate partition size (25% of total size)
-part_size_mb=$((disk_size_mb / 4))
+if [ -z "$DISK" ]; then
+  echo "No disk found. Exiting."
+  exit 1
+fi
 
-#Create GPT partition table
-parted /dev/sda --script -- mklabel gpt
+echo "[4/12] Getting disk size..."
+disk_size_mb=$(lsblk -b -dn -o SIZE $DISK)
+disk_size_mb=$((disk_size_mb / 1024 / 1024))
 
-#Create two partitions
-parted /dev/sda --script -- mkpart primary ntfs 1MB ${part_size_mb}MB
-parted /dev/sda --script -- mkpart primary ntfs ${part_size_mb}MB $((2 * part_size_mb))MB
+part_size_mb=$((disk_size_mb / 2))
 
-#Inform kernel of partition table changes
-partprobe /dev/sda
+echo "[5/12] Wiping disk..."
+wipefs -a $DISK
+sgdisk --zap-all $DISK
 
-sleep 30
+echo "[6/12] Creating partitions..."
+parted -s $DISK mklabel msdos
+parted -s $DISK mkpart primary ntfs 1MiB ${part_size_mb}MiB
+parted -s $DISK mkpart primary ntfs ${part_size_mb}MiB 100%
 
-partprobe /dev/sda
+partprobe $DISK
+sleep 5
 
-sleep 30
+PART1=${DISK}1
+PART2=${DISK}2
 
-partprobe /dev/sda
+# Fix NVMe naming
+if [[ $DISK == *"nvme"* ]]; then
+  PART1=${DISK}p1
+  PART2=${DISK}p2
+fi
 
-sleep 30 
+echo "[7/12] Formatting partitions..."
+mkfs.ntfs -f $PART1
+mkfs.ntfs -f $PART2
 
-#Format the partitions
-mkfs.ntfs -f /dev/sda1
-mkfs.ntfs -f /dev/sda2
+echo "[8/12] Mounting partitions..."
+mkdir -p /mnt/win
+mkdir -p /mnt/install
 
-echo "NTFS partitions created"
+mount $PART1 /mnt/win
+mount $PART2 /mnt/install
 
-echo -e "r\ng\np\nw\nY\n" | gdisk /dev/sda
+echo "[9/12] Installing GRUB..."
+grub-install --boot-directory=/mnt/win/boot $DISK
 
-mount /dev/sda1 /mnt
+cat <<EOF > /mnt/win/boot/grub/grub.cfg
+set timeout=5
+set default=0
 
-#Prepare directory for the Windows disk
-cd ~
-mkdir windisk
-
-mount /dev/sda2 windisk
-
-grub-install --root-directory=/mnt /dev/sda
-
-#Edit GRUB configuration
-cd /mnt/boot/grub
-cat <<EOF > grub.cfg
-menuentry "windows installer" {
-	insmod ntfs
-	search --set=root --file=/bootmgr
-	ntldr /bootmgr
-	boot
+menuentry "Windows Installer" {
+    insmod ntfs
+    search --no-floppy --set=root --file /bootmgr
+    chainloader /bootmgr
 }
 EOF
 
-cd /root/windisk
+echo "[10/12] Downloading Windows ISO..."
+cd /root
 
-mkdir winfile
+wget -O windows.iso https://software-static.download.prss.microsoft.com/dbazure/26100.32230.260111-0550.lt_release_svc_refresh_SERVER_EVAL_x64FRE_en-us.iso
 
-wget -O win10.iso --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" https://software-static.download.prss.microsoft.com/dbazure/998969d5-f34g-4e03-ac9d-1f9786c66749/26100.32230.260111-0550.lt_release_svc_refresh_SERVER_EVAL_x64FRE_en-us.iso
+echo "[11/12] Extracting Windows files..."
+mkdir -p /mnt/iso
+mount -o loop windows.iso /mnt/iso
 
-mount -o loop win10.iso winfile
+rsync -avh --progress /mnt/iso/ /mnt/win/
 
-rsync -avz --progress winfile/* /mnt
+umount /mnt/iso
 
-umount winfile
+echo "[12/12] Downloading VirtIO drivers..."
+wget -O virtio.iso https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso
 
-wget -O virtio.iso https://bit.ly/4d1g7Ht
+mkdir -p /mnt/virtio
+mount -o loop virtio.iso /mnt/virtio
 
-mount -o loop virtio.iso winfile
+mkdir -p /mnt/win/virtio
+rsync -avh /mnt/virtio/ /mnt/win/virtio/
 
-mkdir /mnt/sources/virtio
+umount /mnt/virtio
 
-rsync -avz --progress winfile/* /mnt/sources/virtio
+sync
 
-cd /mnt/sources
-
-touch cmd.txt
-
-echo 'add virtio /virtio_drivers' >> cmd.txt
-
-wimlib-imagex update boot.wim 2 < cmd.txt
+echo "======================================"
+echo "✅ DONE. Rebooting into Windows setup..."
+echo "======================================"
 
 reboot
-
-
