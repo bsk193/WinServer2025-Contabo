@@ -5,17 +5,17 @@ echo "[1/10] Updating package list..."
 apt update -y
 
 echo "[2/10] Installing required packages..."
-# Stub out update-initramfs to prevent "no space left" on the live rescue tmpfs.
-# The live medium at /run/live/medium has no room for a new initrd, but we don't
-# need one — we're booting into Windows, not back into this rescue system.
-dpkg-divert --local --rename --add /usr/sbin/update-initramfs
+# live-tools already has a diversion on update-initramfs, so dpkg-divert would
+# clash. Instead, directly swap the live wrapper with a no-op stub so that
+# package post-install hooks can't trigger an initrd rebuild into the full
+# live medium tmpfs (which has no space).
+mv /usr/sbin/update-initramfs /usr/sbin/update-initramfs.live-backup
 printf '#!/bin/sh\nexit 0\n' > /usr/sbin/update-initramfs
 chmod +x /usr/sbin/update-initramfs
 
 apt install -y grub-pc-bin grub2-common parted gdisk wimtools ntfs-3g rsync wget curl
 
-rm -f /usr/sbin/update-initramfs
-dpkg-divert --local --rename --remove /usr/sbin/update-initramfs
+mv /usr/sbin/update-initramfs.live-backup /usr/sbin/update-initramfs
 
 echo "[3/10] Detecting disk..."
 DISK=$(lsblk -dpno NAME | grep -E "/dev/sd|/dev/vd|/dev/nvme" | head -n1)
