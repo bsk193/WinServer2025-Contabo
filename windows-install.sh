@@ -114,17 +114,21 @@ rsync -avh /mnt/virtio/ /mnt/install/virtio/
 umount /mnt/virtio
 rm -f /mnt/win/virtio.iso
 
-echo "[11/11] Injecting VirtIO SCSI driver and Autounattend.xml into WinPE (boot.wim)..."
-mkdir -p /mnt/wim
+echo "[11/11] Injecting VirtIO SCSI driver into boot.wim and install.wim..."
+mkdir -p /mnt/wim /mnt/wim2
 
-# Autounattend.xml does two things:
-# 1. windowsPE pass: auto-loads vioscsi from X: so disk is visible in Phase 1
-#    with no manual "Load Driver" step needed.
-# 2. offlineServicing pass: DISM injects vioscsi from X: into the offline OS
-#    image so Phase 2 reboots can find the disk without prompting again.
+# --- boot.wim: image 2 only (setup environment) ---
+# Adding to image 1 (bare WinPE) caused a BSOD during WinPE kernel init.
+# Image 2 is what GRUB actually boots for the installer.
+#
+# Autounattend.xml (wcm: namespace required or setup ignores the file):
+#   windowsPE pass  — auto-loads vioscsi from X: so no manual "Load Driver"
+#   offlineServicing pass — DISM injects vioscsi into the offline OS image
+#                          so Phase 2 can find the disk without prompting
 cat > /tmp/Autounattend.xml << 'AEOF'
 <?xml version="1.0" encoding="utf-8"?>
-<unattend xmlns="urn:schemas-microsoft-com:unattend">
+<unattend xmlns="urn:schemas-microsoft-com:unattend"
+          xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
     <settings pass="windowsPE">
         <component name="Microsoft-Windows-PnpCustomizationsWinPE"
                    processorArchitecture="amd64"
@@ -154,19 +158,43 @@ cat > /tmp/Autounattend.xml << 'AEOF'
 </unattend>
 AEOF
 
-# Inject into image 1 (bare WinPE, used by Phase 2 boot)
-wimlib-imagex mountrw /mnt/install/sources/boot.wim 1 /mnt/wim
-mkdir -p /mnt/wim/drivers/vioscsi
-cp -r /mnt/install/virtio/vioscsi/2k25/amd64/* /mnt/wim/drivers/vioscsi/
-cp /tmp/Autounattend.xml /mnt/wim/Autounattend.xml
-wimlib-imagex unmount --commit /mnt/wim
-
-# Inject into image 2 (setup environment, Phase 1)
 wimlib-imagex mountrw /mnt/install/sources/boot.wim 2 /mnt/wim
 mkdir -p /mnt/wim/drivers/vioscsi
 cp -r /mnt/install/virtio/vioscsi/2k25/amd64/* /mnt/wim/drivers/vioscsi/
 cp /tmp/Autounattend.xml /mnt/wim/Autounattend.xml
 wimlib-imagex unmount --commit /mnt/wim
+
+# --- install.wim: all images ---
+# Register vioscsi as a boot-start service in each image's SYSTEM registry
+# hive. This is the guaranteed fix for Phase 2: when the partially-installed
+# Windows reboots for the first time it loads vioscsi and can see the disk
+# without asking the user for drivers again.
+apt-get install -y hivex
+
+cat > /tmp/vioscsi.reg << 'EOF'
+Windows Registry Editor Version 5.00
+
+[ControlSet001\Services\vioscsi]
+"Type"=dword:00000001
+"Start"=dword:00000000
+"ErrorControl"=dword:00000001
+"ImagePath"="\SystemRoot\system32\drivers\vioscsi.sys"
+"DisplayName"="VirtIO SCSI pass-through controller"
+"Group"="SCSI Miniport"
+EOF
+
+IMAGE_COUNT=$(wimlib-imagex info /mnt/install/sources/install.wim | grep -i "image count" | awk '{print $NF}')
+echo "Patching install.wim ($IMAGE_COUNT images)..."
+
+for i in $(seq 1 $IMAGE_COUNT); do
+    echo "  Image $i of $IMAGE_COUNT..."
+    wimlib-imagex mountrw /mnt/install/sources/install.wim $i /mnt/wim2
+    cp /mnt/install/virtio/vioscsi/2k25/amd64/vioscsi.sys \
+        /mnt/wim2/Windows/System32/drivers/
+    hivexregedit --merge /mnt/wim2/Windows/System32/config/SYSTEM \
+        /tmp/vioscsi.reg
+    wimlib-imagex unmount --commit /mnt/wim2
+done
 
 sync
 
