@@ -54,6 +54,8 @@ parted -s $DISK mklabel msdos
 parted -s $DISK mkpart primary ntfs 1MiB ${win_mb}MiB
 parted -s $DISK mkpart primary ntfs ${win_mb}MiB 100%
 
+parted -s $DISK set 1 boot on
+
 partprobe $DISK
 sleep 5
 
