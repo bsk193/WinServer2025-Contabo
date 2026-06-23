@@ -12,7 +12,7 @@ mv /usr/sbin/update-initramfs /usr/sbin/update-initramfs.live-backup
 printf '#!/bin/sh\nexit 0\n' > /usr/sbin/update-initramfs
 chmod +x /usr/sbin/update-initramfs
 
-apt install -y grub-pc-bin grub2-common parted gdisk wimtools ntfs-3g rsync wget curl
+apt install -y grub-pc-bin grub2-common parted gdisk wimtools ntfs-3g rsync wget curl chntpw
 
 mv /usr/sbin/update-initramfs.live-backup /usr/sbin/update-initramfs
 
@@ -115,35 +115,18 @@ umount /mnt/virtio
 rm -f /mnt/win/virtio.iso
 
 echo "[11/11] Injecting VirtIO SCSI driver into boot.wim and install.wim..."
-mkdir -p /mnt/wim
+mkdir -p /mnt/wim /mnt/wim2
 
 # --- boot.wim: image 2 only (setup environment) ---
-# Adding to image 1 (bare WinPE) caused a BSOD during WinPE kernel init.
-# Image 2 is what GRUB actually boots for the installer.
-#
-# Autounattend.xml (wcm: namespace required or setup ignores the file):
-#   windowsPE pass  — auto-loads vioscsi from X: so no manual "Load Driver"
-#   offlineServicing pass — DISM injects vioscsi into the offline OS image
-#                          so Phase 2 can find the disk without prompting
+# Only image 2 — modifying image 1 (bare WinPE) caused a BSOD at kernel init.
+# Autounattend.xml windowsPE pass auto-loads vioscsi so the disk is visible
+# in Phase 1 without any manual "Load Driver" step.
 cat > /tmp/Autounattend.xml << 'AEOF'
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend"
           xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
     <settings pass="windowsPE">
         <component name="Microsoft-Windows-PnpCustomizationsWinPE"
-                   processorArchitecture="amd64"
-                   publicKeyToken="31bf3856ad364e35"
-                   language="neutral"
-                   versionScope="nonSxS">
-            <DriverPaths>
-                <PathAndCredentials wcm:action="add" wcm:keyValue="1">
-                    <Path>X:\drivers\vioscsi</Path>
-                </PathAndCredentials>
-            </DriverPaths>
-        </component>
-    </settings>
-    <settings pass="offlineServicing">
-        <component name="Microsoft-Windows-PnpCustomizationsNonWinPE"
                    processorArchitecture="amd64"
                    publicKeyToken="31bf3856ad364e35"
                    language="neutral"
@@ -164,12 +147,34 @@ cp -r /mnt/install/virtio/vioscsi/2k25/amd64/* /mnt/wim/drivers/vioscsi/
 cp /tmp/Autounattend.xml /mnt/wim/Autounattend.xml
 wimlib-imagex unmount --commit /mnt/wim
 
-# --- install.wim: Phase 2 driver injection via Autounattend.xml ---
-# The offlineServicing pass in Autounattend.xml (already in boot.wim image 2)
-# tells DISM to inject vioscsi from X:\drivers\vioscsi into the offline OS
-# image during Phase 1, before the first reboot. DISM handles both the
-# driver store copy AND the registry service entry, so no separate registry
-# patching tool is needed.
+# --- install.wim: all images ---
+# Register vioscsi as a boot-start service in each image's SYSTEM registry
+# hive using reged (from chntpw). Phase 2 loads vioscsi at first reboot and
+# can see the disk without prompting for drivers again.
+cat > /tmp/vioscsi.reg << 'EOF'
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SYSTEM\ControlSet001\Services\vioscsi]
+"Type"=dword:00000001
+"Start"=dword:00000000
+"ErrorControl"=dword:00000001
+"ImagePath"="\SystemRoot\system32\drivers\vioscsi.sys"
+"DisplayName"="VirtIO SCSI pass-through controller"
+"Group"="SCSI Miniport"
+EOF
+
+IMAGE_COUNT=$(wimlib-imagex info /mnt/install/sources/install.wim | grep -i "image count" | awk '{print $NF}')
+echo "Patching install.wim ($IMAGE_COUNT images)..."
+
+for i in $(seq 1 $IMAGE_COUNT); do
+    echo "  Image $i of $IMAGE_COUNT..."
+    wimlib-imagex mountrw /mnt/install/sources/install.wim $i /mnt/wim2
+    cp /mnt/install/virtio/vioscsi/2k25/amd64/vioscsi.sys \
+        /mnt/wim2/Windows/System32/drivers/
+    reged -I /mnt/wim2/Windows/System32/config/SYSTEM \
+          'HKEY_LOCAL_MACHINE\SYSTEM' /tmp/vioscsi.reg
+    wimlib-imagex unmount --commit /mnt/wim2
+done
 
 sync
 
