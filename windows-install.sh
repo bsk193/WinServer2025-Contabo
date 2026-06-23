@@ -12,7 +12,7 @@ mv /usr/sbin/update-initramfs /usr/sbin/update-initramfs.live-backup
 printf '#!/bin/sh\nexit 0\n' > /usr/sbin/update-initramfs
 chmod +x /usr/sbin/update-initramfs
 
-apt install -y grub-pc-bin grub2-common parted gdisk wimtools ntfs-3g rsync wget curl hivex
+apt install -y grub-pc-bin grub2-common parted gdisk wimtools ntfs-3g rsync wget curl
 
 mv /usr/sbin/update-initramfs.live-backup /usr/sbin/update-initramfs
 
@@ -115,7 +115,7 @@ umount /mnt/virtio
 rm -f /mnt/win/virtio.iso
 
 echo "[11/11] Injecting VirtIO SCSI driver into boot.wim and install.wim..."
-mkdir -p /mnt/wim /mnt/wim2
+mkdir -p /mnt/wim
 
 # --- boot.wim: image 2 only (setup environment) ---
 # Adding to image 1 (bare WinPE) caused a BSOD during WinPE kernel init.
@@ -164,35 +164,12 @@ cp -r /mnt/install/virtio/vioscsi/2k25/amd64/* /mnt/wim/drivers/vioscsi/
 cp /tmp/Autounattend.xml /mnt/wim/Autounattend.xml
 wimlib-imagex unmount --commit /mnt/wim
 
-# --- install.wim: all images ---
-# Register vioscsi as a boot-start service in each image's SYSTEM registry
-# hive. This is the guaranteed fix for Phase 2: when the partially-installed
-# Windows reboots for the first time it loads vioscsi and can see the disk
-# without asking the user for drivers again.
-cat > /tmp/vioscsi.reg << 'EOF'
-Windows Registry Editor Version 5.00
-
-[ControlSet001\Services\vioscsi]
-"Type"=dword:00000001
-"Start"=dword:00000000
-"ErrorControl"=dword:00000001
-"ImagePath"="\SystemRoot\system32\drivers\vioscsi.sys"
-"DisplayName"="VirtIO SCSI pass-through controller"
-"Group"="SCSI Miniport"
-EOF
-
-IMAGE_COUNT=$(wimlib-imagex info /mnt/install/sources/install.wim | grep -i "image count" | awk '{print $NF}')
-echo "Patching install.wim ($IMAGE_COUNT images)..."
-
-for i in $(seq 1 $IMAGE_COUNT); do
-    echo "  Image $i of $IMAGE_COUNT..."
-    wimlib-imagex mountrw /mnt/install/sources/install.wim $i /mnt/wim2
-    cp /mnt/install/virtio/vioscsi/2k25/amd64/vioscsi.sys \
-        /mnt/wim2/Windows/System32/drivers/
-    hivexregedit --merge /mnt/wim2/Windows/System32/config/SYSTEM \
-        /tmp/vioscsi.reg
-    wimlib-imagex unmount --commit /mnt/wim2
-done
+# --- install.wim: Phase 2 driver injection via Autounattend.xml ---
+# The offlineServicing pass in Autounattend.xml (already in boot.wim image 2)
+# tells DISM to inject vioscsi from X:\drivers\vioscsi into the offline OS
+# image during Phase 1, before the first reboot. DISM handles both the
+# driver store copy AND the registry service entry, so no separate registry
+# patching tool is needed.
 
 sync
 
