@@ -12,7 +12,7 @@ mv /usr/sbin/update-initramfs /usr/sbin/update-initramfs.live-backup
 printf '#!/bin/sh\nexit 0\n' > /usr/sbin/update-initramfs
 chmod +x /usr/sbin/update-initramfs
 
-apt install -y grub-pc-bin grub2-common parted gdisk wimtools ntfs-3g rsync wget curl
+apt install -y grub-pc-bin grub2-common parted gdisk wimtools ntfs-3g rsync wget curl hivex
 
 mv /usr/sbin/update-initramfs.live-backup /usr/sbin/update-initramfs
 
@@ -169,8 +169,6 @@ wimlib-imagex unmount --commit /mnt/wim
 # hive. This is the guaranteed fix for Phase 2: when the partially-installed
 # Windows reboots for the first time it loads vioscsi and can see the disk
 # without asking the user for drivers again.
-apt-get install -y hivex
-
 cat > /tmp/vioscsi.reg << 'EOF'
 Windows Registry Editor Version 5.00
 
