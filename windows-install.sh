@@ -171,8 +171,8 @@ for i in $(seq 1 $IMAGE_COUNT); do
     wimlib-imagex mountrw /mnt/install/sources/install.wim $i /mnt/wim2
     cp /mnt/install/virtio/vioscsi/2k25/amd64/vioscsi.sys \
         /mnt/wim2/Windows/System32/drivers/
-    reged -I /mnt/wim2/Windows/System32/config/SYSTEM \
-          'HKEY_LOCAL_MACHINE\SYSTEM' /tmp/vioscsi.reg
+    echo y | reged -I /mnt/wim2/Windows/System32/config/SYSTEM \
+          'HKEY_LOCAL_MACHINE\SYSTEM' /tmp/vioscsi.reg || true
     wimlib-imagex unmount --commit /mnt/wim2
 done
 
