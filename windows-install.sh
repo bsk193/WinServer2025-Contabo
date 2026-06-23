@@ -114,15 +114,58 @@ rsync -avh /mnt/virtio/ /mnt/install/virtio/
 umount /mnt/virtio
 rm -f /mnt/win/virtio.iso
 
-echo "[11/11] Injecting VirtIO SCSI driver into WinPE (boot.wim)..."
-# Contabo uses VirtIO-SCSI (disk shows as sda). Without vioscsi in WinPE
-# the installer sees no disks at all.
+echo "[11/11] Injecting VirtIO SCSI driver and Autounattend.xml into WinPE (boot.wim)..."
 mkdir -p /mnt/wim
-wimlib-imagex mountrw /mnt/install/sources/boot.wim 2 /mnt/wim
 
+# Autounattend.xml does two things:
+# 1. windowsPE pass: auto-loads vioscsi from X: so disk is visible in Phase 1
+#    with no manual "Load Driver" step needed.
+# 2. offlineServicing pass: DISM injects vioscsi from X: into the offline OS
+#    image so Phase 2 reboots can find the disk without prompting again.
+cat > /tmp/Autounattend.xml << 'AEOF'
+<?xml version="1.0" encoding="utf-8"?>
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+    <settings pass="windowsPE">
+        <component name="Microsoft-Windows-PnpCustomizationsWinPE"
+                   processorArchitecture="amd64"
+                   publicKeyToken="31bf3856ad364e35"
+                   language="neutral"
+                   versionScope="nonSxS">
+            <DriverPaths>
+                <PathAndCredentials wcm:action="add" wcm:keyValue="1">
+                    <Path>X:\drivers\vioscsi</Path>
+                </PathAndCredentials>
+            </DriverPaths>
+        </component>
+    </settings>
+    <settings pass="offlineServicing">
+        <component name="Microsoft-Windows-PnpCustomizationsNonWinPE"
+                   processorArchitecture="amd64"
+                   publicKeyToken="31bf3856ad364e35"
+                   language="neutral"
+                   versionScope="nonSxS">
+            <DriverPaths>
+                <PathAndCredentials wcm:action="add" wcm:keyValue="1">
+                    <Path>X:\drivers\vioscsi</Path>
+                </PathAndCredentials>
+            </DriverPaths>
+        </component>
+    </settings>
+</unattend>
+AEOF
+
+# Inject into image 1 (bare WinPE, used by Phase 2 boot)
+wimlib-imagex mountrw /mnt/install/sources/boot.wim 1 /mnt/wim
 mkdir -p /mnt/wim/drivers/vioscsi
 cp -r /mnt/install/virtio/vioscsi/2k25/amd64/* /mnt/wim/drivers/vioscsi/
+cp /tmp/Autounattend.xml /mnt/wim/Autounattend.xml
+wimlib-imagex unmount --commit /mnt/wim
 
+# Inject into image 2 (setup environment, Phase 1)
+wimlib-imagex mountrw /mnt/install/sources/boot.wim 2 /mnt/wim
+mkdir -p /mnt/wim/drivers/vioscsi
+cp -r /mnt/install/virtio/vioscsi/2k25/amd64/* /mnt/wim/drivers/vioscsi/
+cp /tmp/Autounattend.xml /mnt/wim/Autounattend.xml
 wimlib-imagex unmount --commit /mnt/wim
 
 sync
@@ -130,14 +173,16 @@ sync
 echo "=============================================="
 echo "DONE. Rebooting into Windows setup..."
 echo ""
+echo "  The vioscsi driver loads automatically - no manual"
+echo "  'Load Driver' step needed."
+echo ""
 echo "  At the disk selection screen:"
 echo "  -> Select Drive 0 Partition 1 (~285GB) and click Next"
-echo "  -> Do NOT delete Partition 2 (15GB installer at end of disk)"
-echo "  -> If disk not visible: Load Driver -> X:\\drivers\\vioscsi"
+echo "  -> Do NOT delete or touch Partition 2 (15GB at end)"
 echo ""
 echo "  After Windows is installed and running:"
 echo "  -> Open Disk Management"
-echo "  -> Delete Partition 2 (~15GB, shown at end of disk)"
+echo "  -> Delete Partition 2 (~15GB at end of disk)"
 echo "  -> Right-click C: -> Extend Volume -> full 300GB"
 echo "=============================================="
 
