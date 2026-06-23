@@ -12,7 +12,7 @@ mv /usr/sbin/update-initramfs /usr/sbin/update-initramfs.live-backup
 printf '#!/bin/sh\nexit 0\n' > /usr/sbin/update-initramfs
 chmod +x /usr/sbin/update-initramfs
 
-apt install -y grub-pc-bin grub2-common parted gdisk wimtools ntfs-3g rsync wget curl chntpw
+apt install -y grub-pc-bin grub2-common parted gdisk wimtools ntfs-3g rsync wget curl
 
 mv /usr/sbin/update-initramfs.live-backup /usr/sbin/update-initramfs
 
@@ -114,67 +114,49 @@ rsync -avh /mnt/virtio/ /mnt/install/virtio/
 umount /mnt/virtio
 rm -f /mnt/win/virtio.iso
 
-echo "[11/11] Injecting VirtIO SCSI driver into boot.wim and install.wim..."
-mkdir -p /mnt/wim /mnt/wim2
+echo "[11/11] Injecting VirtIO SCSI driver into boot.wim..."
+mkdir -p /mnt/wim
 
-# --- boot.wim: image 2 only (setup environment) ---
-# Only image 2 — modifying image 1 (bare WinPE) caused a BSOD at kernel init.
-# Autounattend.xml windowsPE pass auto-loads vioscsi so the disk is visible
-# in Phase 1 without any manual "Load Driver" step.
-cat > /tmp/Autounattend.xml << 'AEOF'
-<?xml version="1.0" encoding="utf-8"?>
-<unattend xmlns="urn:schemas-microsoft-com:unattend"
-          xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
-    <settings pass="windowsPE">
-        <component name="Microsoft-Windows-PnpCustomizationsWinPE"
-                   processorArchitecture="amd64"
-                   publicKeyToken="31bf3856ad364e35"
-                   language="neutral"
-                   versionScope="nonSxS">
-            <DriverPaths>
-                <PathAndCredentials wcm:action="add" wcm:keyValue="1">
-                    <Path>X:\drivers\vioscsi</Path>
-                </PathAndCredentials>
-            </DriverPaths>
-        </component>
-    </settings>
-</unattend>
-AEOF
+# --- boot.wim: image 2 only ---
+# Autounattend.xml DriverPaths did not load vioscsi before setup enumerated
+# disks, so the "Load driver" prompt still appeared. New approach:
+#
+# Override winpeshl.ini so winpeshl.exe runs a wrapper batch instead of
+# setup.exe directly. The wrapper:
+#   1. Calls drvload to load vioscsi BEFORE setup.exe starts
+#   2. Runs setup.exe (Phase 1 — expands image, no driver prompt)
+#   3. After setup.exe exits, cancels any pending reboot
+#   4. Runs DISM to inject vioscsi into the installed Windows on C:
+#      (DISM handles both driver store + registry service entry)
+#   5. Reboots into Phase 2 — vioscsi already registered, no prompt
 
 wimlib-imagex mountrw /mnt/install/sources/boot.wim 2 /mnt/wim
 mkdir -p /mnt/wim/drivers/vioscsi
 cp -r /mnt/install/virtio/vioscsi/2k25/amd64/* /mnt/wim/drivers/vioscsi/
-cp /tmp/Autounattend.xml /mnt/wim/Autounattend.xml
+
+# Batch wrapper — single-quoted heredoc keeps %% and \r\n safe from bash
+cat > /tmp/setup_wrapper.bat << 'BATEOF'
+@echo off
+drvload X:\drivers\vioscsi\vioscsi.inf
+X:\sources\setup.exe
+shutdown /a 2>nul
+set WINDRV=C
+for %%d in (C D E F G) do (
+    if exist %%d:\Windows\System32\winload.exe (
+        if not "%%d"=="X" if not defined WINDRV set WINDRV=%%d
+    )
+)
+dism /Image:%WINDRV%:\ /Add-Driver /Driver:X:\drivers\vioscsi\vioscsi.inf /ForceUnsigned
+wpeutil reboot
+BATEOF
+sed -i 's/$/\r/' /tmp/setup_wrapper.bat
+cp /tmp/setup_wrapper.bat /mnt/wim/setup_wrapper.bat
+
+# winpeshl.ini — tell WinPE to launch cmd.exe running our wrapper
+printf '[LaunchApps]\r\n%%SYSTEMROOT%%\\system32\\cmd.exe /c X:\\setup_wrapper.bat\r\n' \
+    > /mnt/wim/Windows/System32/winpeshl.ini
+
 wimlib-imagex unmount --commit /mnt/wim
-
-# --- install.wim: all images ---
-# Register vioscsi as a boot-start service in each image's SYSTEM registry
-# hive using reged (from chntpw). Phase 2 loads vioscsi at first reboot and
-# can see the disk without prompting for drivers again.
-cat > /tmp/vioscsi.reg << 'EOF'
-Windows Registry Editor Version 5.00
-
-[HKEY_LOCAL_MACHINE\SYSTEM\ControlSet001\Services\vioscsi]
-"Type"=dword:00000001
-"Start"=dword:00000000
-"ErrorControl"=dword:00000001
-"ImagePath"="\SystemRoot\system32\drivers\vioscsi.sys"
-"DisplayName"="VirtIO SCSI pass-through controller"
-"Group"="SCSI Miniport"
-EOF
-
-IMAGE_COUNT=$(wimlib-imagex info /mnt/install/sources/install.wim | grep -i "image count" | awk '{print $NF}')
-echo "Patching install.wim ($IMAGE_COUNT images)..."
-
-for i in $(seq 1 $IMAGE_COUNT); do
-    echo "  Image $i of $IMAGE_COUNT..."
-    wimlib-imagex mountrw /mnt/install/sources/install.wim $i /mnt/wim2
-    cp /mnt/install/virtio/vioscsi/2k25/amd64/vioscsi.sys \
-        /mnt/wim2/Windows/System32/drivers/
-    echo y | reged -I /mnt/wim2/Windows/System32/config/SYSTEM \
-          'HKEY_LOCAL_MACHINE\SYSTEM' /tmp/vioscsi.reg || true
-    wimlib-imagex unmount --commit /mnt/wim2
-done
 
 sync
 
